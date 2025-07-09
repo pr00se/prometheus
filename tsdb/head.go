@@ -108,7 +108,7 @@ type Head struct {
 	series *stripeSeries
 
 	walExpiriesMtx sync.Mutex
-	walExpiries    map[chunks.HeadSeriesRef]int // Series no longer in the head, and what WAL segment they must be kept until.
+	walExpiries    map[chunks.HeadSeriesRef]int64 // Series no longer in the head, and what WAL segment they must be kept until.
 
 	// TODO(codesome): Extend MemPostings to return only OOOPostings, Set OOOStatus, ... Like an additional map of ooo postings.
 	postings *index.MemPostings // Postings lists for terms.
@@ -335,7 +335,7 @@ func (h *Head) resetInMemoryState() error {
 	h.exemplars = es
 	h.postings = index.NewUnorderedMemPostings()
 	h.tombstones = tombstones.NewMemTombstones()
-	h.walExpiries = map[chunks.HeadSeriesRef]int{}
+	h.walExpiries = map[chunks.HeadSeriesRef]int64{}
 	h.chunkRange.Store(h.opts.ChunkRange)
 	h.minTime.Store(math.MaxInt64)
 	h.maxTime.Store(math.MinInt64)
@@ -1272,7 +1272,7 @@ func (h *Head) IsQuerierCollidingWithTruncation(querierMint, querierMaxt int64) 
 	return false, false, 0
 }
 
-func (h *Head) getWALExpiry(id chunks.HeadSeriesRef) (int, bool) {
+func (h *Head) getWALExpiry(id chunks.HeadSeriesRef) (int64, bool) {
 	h.walExpiriesMtx.Lock()
 	defer h.walExpiriesMtx.Unlock()
 
@@ -1280,7 +1280,7 @@ func (h *Head) getWALExpiry(id chunks.HeadSeriesRef) (int, bool) {
 	return keepUntil, ok
 }
 
-func (h *Head) setWALExpiry(id chunks.HeadSeriesRef, keepUntil int) {
+func (h *Head) setWALExpiry(id chunks.HeadSeriesRef, keepUntil int64) {
 	h.walExpiriesMtx.Lock()
 	defer h.walExpiriesMtx.Unlock()
 
@@ -1288,8 +1288,8 @@ func (h *Head) setWALExpiry(id chunks.HeadSeriesRef, keepUntil int) {
 }
 
 // keepSeriesInWALCheckpoint is used to determine whether a series record should be kept in the checkpoint
-// last is the last WAL segment that was considered for checkpointing.
-func (h *Head) keepSeriesInWALCheckpoint(id chunks.HeadSeriesRef, last int) bool {
+// mint is the timestamp at which the WAL is being truncated
+func (h *Head) keepSeriesInWALCheckpoint(id chunks.HeadSeriesRef, mint int64) bool {
 	// Keep the record if the series exists in the head.
 	if h.series.getByID(id) != nil {
 		return true
@@ -1297,7 +1297,7 @@ func (h *Head) keepSeriesInWALCheckpoint(id chunks.HeadSeriesRef, last int) bool
 
 	// Keep the record if the series has an expiry set.
 	keepUntil, ok := h.getWALExpiry(id)
-	return ok && keepUntil > last
+	return ok && keepUntil > mint
 }
 
 // truncateWAL removes old data before mint from the WAL.
@@ -1352,8 +1352,8 @@ func (h *Head) truncateWAL(mint int64) error {
 	// The checkpoint is written and segments before it is truncated, so stop
 	// tracking expired series.
 	h.walExpiriesMtx.Lock()
-	for ref, segment := range h.walExpiries {
-		if segment <= last {
+	for ref, ts := range h.walExpiries {
+		if ts <= mint {
 			delete(h.walExpiries, ref)
 		}
 	}
@@ -1623,7 +1623,6 @@ func (h *Head) gc() (actualInOrderMint, minOOOTime int64, minMmapFile int) {
 	h.tombstones.TruncateBefore(mint)
 
 	if h.wal != nil {
-		_, last, _ := wlog.Segments(h.wal.Dir())
 		h.walExpiriesMtx.Lock()
 		// Keep series records until we're past segment 'last'
 		// because the WAL will still have samples records with
@@ -1632,7 +1631,7 @@ func (h *Head) gc() (actualInOrderMint, minOOOTime int64, minMmapFile int) {
 		// that reads the WAL, wouldn't be able to use those
 		// samples since we would have no labels for that ref ID.
 		for ref := range deleted {
-			h.walExpiries[chunks.HeadSeriesRef(ref)] = last
+			h.walExpiries[chunks.HeadSeriesRef(ref)] = mint
 		}
 		h.walExpiriesMtx.Unlock()
 	}

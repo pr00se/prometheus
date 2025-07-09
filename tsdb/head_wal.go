@@ -265,8 +265,6 @@ Outer:
 				}
 				if !created {
 					multiRef[walSeries.Ref] = mSeries.ref
-					// Set the WAL expiry for the duplicate series, so it is kept in subsequent WAL checkpoints.
-					h.setWALExpiry(walSeries.Ref, lastSegment)
 				}
 
 				idx := uint64(mSeries.ref) % uint64(concurrency)
@@ -292,6 +290,8 @@ Outer:
 						continue // Before minValidTime: discard.
 					}
 					if r, ok := multiRef[sam.Ref]; ok {
+						// !!!! TODO -- need to do this for all record types
+						h.setWALExpiry(sam.Ref, sam.T)
 						sam.Ref = r
 					}
 					mod := uint64(sam.Ref) % uint64(concurrency)
